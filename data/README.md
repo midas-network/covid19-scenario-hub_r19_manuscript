@@ -8,7 +8,7 @@ and auxiliary data
 `model-metadata`: contains the metadata associated with each model   
 `model-processed`: contains the "processed" data
 
-### Calculating Cumulative Samples, Quantiles and Ensembles
+### "Processed" Data
 
 Additional targets are **only** calculated if not provided in the team-model
 submission file and the associated round is expecting those targets (required
