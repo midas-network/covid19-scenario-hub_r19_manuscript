@@ -4,8 +4,9 @@ This folder contains the "processed" data for Round 19 of
 [COVID-19 Scenario Modeling Hub](https://covid19scenariomodelinghub.org/)
 and auxiliary data
 
-`model-processed`: contains the "processed" data
 `data-locations`: contains the location name and ID used in the files
+`model-metadata`: contains the metadata associated with each model
+`model-processed`: contains the "processed" data
 
 ### Calculating Cumulative Samples, Quantiles and Ensembles
 
