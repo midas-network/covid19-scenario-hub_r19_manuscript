@@ -1,0 +1,520 @@
+---
+output: 
+  pdf_document: 
+    fig_caption: no
+header-includes:
+  - \usepackage{pdfpages}
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+\fontsize{11}{22}
+\renewcommand{\familydefault}{\sfdefault}
+
+# Round 19 Executive Summary Report
+COVID-19 Scenario Modeling Hub, `r format(Sys.time(), '%d %B, %Y')`\
+See [covid19scenariomodelinghub.org](https://covid19scenariomodelinghub.org) for more results and details.\ 
+<!-- Scenario Modeling Hub Team -->
+<!-- ^[Compiled by Shaun Truelove, Sung-mok Jung, Lucie Contamin, Cécile Viboud, and Justin Lessler.] -->
+
+```{r setup, include=FALSE}
+
+rerun_metaanalysis <- TRUE
+loc_select <- "US"
+loc_abbr <- "US"
+numdiff_for_text <- NULL
+reldiff_for_text <- NULL
+
+
+### path to local version of repository
+#local_path <- "/Users/eah394/Documents/GitHub/"
+#local_path <- "C:/Users/clair/Documents/COVID/SMH/"
+# local_path <- "/Users/saraloo/Documents/SMH/COVID/"
+# local_path <- "C:/Users/ecarcele/Documents/JHUProjects/SMH/COVID/"
+
+
+local_path <- file.path(dirname(here::here()))
+this_path <- here::here()
+
+dir_path <- file.path(local_path, "covid19-scenario-hub_analysis")
+data_path <- file.path(local_path, "covid-19-smh_data")
+smh_path <- file.path(local_path, "covid19-scenario-modeling-hub")
+web_path <- file.path(local_path, "covid19-scenario-hub_website")
+
+# sys_call <- paste0("cd ", dir_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", data_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", web_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", this_path, "/")
+# system(sys_call)
+
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE,
+                      cache.lazy = FALSE,
+                      dev = 'pdf')
+knitr::opts_knit$set(root.dir = dir_path)
+
+library(tidyverse)
+library(readr)
+library(scales)
+library(purrr)
+library(ggpmisc)
+library(usmap)
+library(reshape2)
+library(data.table)
+library(arrow)
+library(tidytext)
+library(lubridate)
+library(jsonlite)
+library(hubUtils)
+
+
+```
+
+```{r report_prep, message=FALSE, warning=FALSE, cache=FALSE, include=FALSE}
+# add to options to cache data build ---  
+
+# Get Round Metadata
+round_metadata <- hubUtils::read_config(smh_path, "tasks")
+round_id <- max(get_round_ids(round_metadata))
+
+# get_round_model_tasks(round_metadata, round_id = round_id)
+# get_round_model_tasks(round_metadata, round_id = round_id)
+
+
+
+## choose scenario identifier and appropriate hosp file
+scenario.id <- "2025-04-01"
+projection.start.date <- round_id
+projection.end.date <- "2026-04-25"
+year_start <- 2025
+year_end <- 2026
+round <- 19
+ens_choice <- "Ensemble_LOP"
+pi_low <- 0.025
+pi_high <- 0.975  
+
+
+
+# load metadata on Round
+
+model_names <- list.dirs(file.path(data_path, "model-processed", round_id), 
+                         full.names = FALSE, 
+                         recursive = FALSE) 
+
+model_names <- c(model_names[grepl("Ensemble", model_names)], 
+                 model_names[!grepl("Ensemble", model_names)]) # put ensemble first
+
+# model_names <- c("Ensemble",
+#                  "Ensemble_LOP",
+#                  "Ensemble_LOP_untrimmed",
+#                  "JHU_UNC-flepiMoP",
+#                  "MOBS_NEU-GLEAM_COVID",
+#                  "NotreDame-FRED",
+#                  "PSI-PROF",
+#                  "UNCC-hierbin",
+#                  "USC-SIkJalpha",
+#                  "UTA-ImmunoSEIRS",
+#                  "UVA-adaptive",
+#                  "CFA-Scenarios")
+
+
+# load(paste0(web_path,"visualization/data-visualization/sysdata.rda"))
+
+# Scenario name information - UPDATE EACH ROUND
+axis1 <- c("noBoo", "HighRiskVax", "allVax")
+axis2 <- c("noTiming", "classicTiming", "earlyTiming")
+axis1_long <- c("No booster", "65+ and high-risk booster", "All booster")
+axis2_long <- c("No Immunization", "Classic Immunization", "Early Immunization") 
+var_name1 <- "booster"
+var_name2 <- "timing"
+pessimistic <- paste0(axis1[1], "_", axis2[1]) # most pessimistic scenario to use for risk maps
+
+scn_combos <- list(
+  c(1,1),
+  c(2,2),
+  c(2,3),
+  c(3,2),
+  c(3,3)
+)
+
+
+
+# set the axis and scenario names and labels
+scn_names <- sapply(scn_combos, function(x) paste(axis1[x[1]], axis2[x[2]], sep = "_"))
+scenario_ids <- paste0(LETTERS[1:length(scn_names)], "-", scenario.id)
+a1 <- sapply(scn_combos, function(x) axis1[x[1]])
+a2 <- sapply(scn_combos, function(x) axis2[x[2]])
+a1long <- sapply(scn_combos, function(x) axis1_long[x[1]])
+a2long <- sapply(scn_combos, function(x) axis2_long[x[2]])
+
+
+```
+
+
+```{r load_trajdata, include=FALSE, echo = FALSE, warning = FALSE}
+
+if(rerun_metaanalysis){
+  
+  unmatched_models <- NA
+  
+  # load data from the round for trajectories
+  # source(file.path(dir_path,"code/R/read_sample_files.R"), local = knitr::knit_global())
+  source(file.path(dir_path,"code/R/read_sample_files_US.R"), local = knitr::knit_global())
+  
+  # Run each meta analysis
+  
+  # overall
+  age_group_tmp <- "0-130"
+  age_group_label <- "Overall"
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = knitr::knit_global())
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  # 0-64
+  age_group_tmp <- "0-64"
+  age_group_label <- "0-64"
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = knitr::knit_global())
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  # 65+
+  age_group_tmp <- "65-130"
+  age_group_label <- "65+"
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = knitr::knit_global())
+  source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  
+  gc()
+  rm(df_sample)
+  gc()
+}
+
+```
+
+
+
+
+
+```{r load_quantdata, include=FALSE}
+
+print(dir_path)
+source(file.path(dir_path,"code/R/read_data_files.R"), local = knitr::knit_global())
+source(file.path(dir_path,"code/R/collect_data_update.R"), local = knitr::knit_global())
+gc()
+
+```
+
+
+
+```{r format_data, include = FALSE}
+
+# some columns to use for plotting
+names(scn_names) <- scenario_ids
+names(a1) <- scenario_ids
+names(a2) <- scenario_ids
+names(a1long) <- scenario_ids
+names(a2long) <- scenario_ids
+
+
+quant_data_ci <- quant_data_ci %>%
+  mutate(model = factor(model, levels = model_names)) %>%
+  mutate(scenario_name = recode(scenario_id, !!! scn_names)) %>%
+  mutate(a1 = recode(scenario_id, !!! a1)) %>%
+  mutate(a2 = recode(scenario_id, !!! a2)) %>%
+  mutate(a1long = recode(scenario_id, !!! a1long)) %>%
+  mutate(a2long = recode(scenario_id, !!! a2long)) %>%
+  mutate(a1long = factor(a1long, levels = axis1_long)) %>%
+  mutate(a2long = factor(a2long, levels = axis2_long)) %>%
+  mutate(full_scenario = paste(a1long, a2long, sep = ", "))
+
+
+quant_data <- quant_data %>%
+  mutate(model = factor(model, levels = model_names)) %>%
+  mutate(scenario_name = recode(scenario_id, !!! scn_names)) %>%
+  mutate(a1 = recode(scenario_id, !!! a1)) %>%
+  mutate(a2 = recode(scenario_id, !!! a2)) %>%
+  mutate(a1long = recode(scenario_id, !!! a1long)) %>%
+  mutate(a2long = recode(scenario_id, !!! a2long)) %>%
+  mutate(a1long = factor(a1long, levels = axis1_long)) %>%
+  mutate(a2long = factor(a2long, levels = axis2_long)) %>%
+  mutate(full_scenario = paste(a1long, a2long, sep = ", "))
+
+
+# filter out projections beyond 26 weeks
+quant_data <- quant_data %>% filter(target_end_date <= as.Date(projection.end.date))
+quant_data_ci  <- quant_data_ci  %>% filter(target_end_date <= as.Date(projection.end.date))
+
+```
+
+
+```{r viz_setup, include=FALSE, echo = FALSE, warning = FALSE}
+## parameters for visualization
+
+
+
+model_size <- c(0.7, rep(.3, length(model_names)-1))
+names(model_size) <- model_names
+
+model_colors <- c(rep("#000000", sum(grepl("Ensemble", model_names))), 
+                  c("#E69F00", "#009E73", "#332288", "#56B4E9", "#661100", "#F0E442", "#CC79A7", "#D55E00", "#0072B2")[1:sum(!grepl("Ensemble", model_names))])
+names(model_colors) <- model_names
+
+# colorblind friendly palette, note: may need to change with more teams
+# additional options - "#D55E00", "#0072B2"
+# model_colors <- c("Ensemble" = "#000000", 
+#                   "JHU_UNC-flepiMoP" = "#E69F00", #"CU-AGE-ST" = "#D55E00",
+#                   "MOBS_NEU-GLEAM_COVID" = "#009E73", #"JHUAPL-Bucky" = "0072B2",  
+#                   "NotreDame-FRED" = "#332288", 
+#                   "PSI-PROF" = "#56B4E9", #"Karlen-pypm" = "#56B4E9", "UF-ABM" = "#56B4E9", 
+#                   "UNCC-hierbin" = "#661100", 
+#                   "USC-SIkJalpha" = "#F0E442",
+#                   "UTA-ImmunoSEIRS" = "#56B4E9",
+#                   "UVA-adaptive" = "#CC79A7",
+#                   "CFA-Scenarios" = "#D55E00")
+
+# scenarios <- c(s1.1, s1.2, s2.1, s2.2, s3.1, s3.2)
+
+# make scenario labels more explicit
+# first set on one line
+scenario_labs <- sapply(scn_combos, function(x) paste(axis1_long[x[1]], axis2_long[x[2]], sep = ", "))
+names(scenario_labs) <- scn_names
+# second set on two lines
+scenario_labs_2 <- sapply(scn_combos, function(x) paste(axis1_long[x[1]], axis2_long[x[2]], sep = "\n"))
+names(scenario_labs_2) <- scn_names
+
+
+# other
+breaks <- seq(as.Date("2020-01-01"), as.Date(projection.end.date), "4 month") #as.Date("2021-07-01")
+targets <- c("Hospitalizations", "Deaths")
+agegroups <- c("0-130", "0-64", "65-130")
+lev <- unique(loc$location_name) 
+
+v_line = data.frame(x = as.numeric(as.Date(projection.start.date)),
+                    y = Inf,
+                    lab = paste0("Projections begin\n",projection.start.date),
+                    target_type = "Hospitalizations")
+
+
+# prior season max
+prior_max = truth %>%
+  filter(date >= paste0((lubridate::year(round_id)-1), "-04-01") & date < as.Date(projection.start.date)) %>%
+  group_by(target_type, location, location_name, age_group) %>%
+  summarise(max_value = max(value, na.rm = TRUE)) %>%
+  ungroup() 
+
+# #define CDC community transmission thresholds
+# h_line_medthr = data.frame(x = Inf,
+#                            y = 32872.85,
+#                            lab = paste0("Medium Threshold: 32873"),
+#                            target_type = "Hospitalizations")
+# 
+# h_line_highthr = data.frame(x = Inf,
+#                             y = 65745.69,
+#                             lab = paste0("High Threshold: 65746"),
+#                             target_type = "Hospitalizations")
+
+
+terr <- c("60", "66", "69", "74", "78")
+```
+
+
+```{r}
+# filter truth data starting Nov 1 year before only to make projections more visible
+truth = truth %>% filter(date >= paste0((lubridate::year(round_id)-1), "-11-01"))
+```
+
+
+## General Dynamics
+
+* **Based on the national ensemble, we expect two periods of increased COVID-19 activity, in summer 2025 and winter 2025-26, in each scenario**, with a first peak projected in late August 2025 and a second peak in January 2026, for both hospitalizations and deaths. Based on the 50% projection interval, both peaks are expected to remain close to that of last winter season (i.e., 20,000 weekly hospitalizations nationally). 
+
+* **Among all scenarios, continued substantial burden of disease from COVID-19 is expected**, with 648,000 cumulative hospitalizations (95% PI 241,000–778,000) and 40,000 deaths (95% PI 25,000-59,000) due to COVID-19 projected over the course of the projection period (April 27, 2025 to April 25, 2026) in the high risk group scenario (i.e., booster vaccination only among individuals aged 65+ or otherwise at high risk for elevated severity). 
+
+
+
+
+```{r, fig.width = 10, fig.height=4.6}
+
+truth_toplot <- truth %>%
+  filter(age_group == "0-130" | is.na(age_group))
+v_line_toplot <- v_line %>% dplyr::select(-target_type)
+
+temp <- quant_data %>%
+  filter(model == "Ensemble", age_group == "0-130",
+         output_type == "quantile", str_detect(target, "inc"), abbreviation == "US") %>%
+  filter(is.na(type)) %>%
+  pivot_wider(names_from = quantile, names_prefix = "q") %>%
+  mutate(a1 = factor(a1, levels = axis1)) %>%
+  mutate(a2 = factor(a2, levels = axis2)) %>%
+  arrange(a1, a2) %>% 
+  filter(a2 != "earlyTiming")
+
+
+plot <- list()
+
+for (i in targets){
+  plot[[i]] <- ggplot(data = temp %>% filter(target_type == i)) +
+    geom_vline(data = v_line_toplot, aes(xintercept = x), color = "grey60")+
+    geom_text(data = v_line_toplot, aes(x = x, y = y, label = lab), hjust = 0, vjust = 1, size = 3)+
+    # geom_hline(data = temp_thresholds, aes(yintercept = y), color = "red", linetype = 2, alpha = 0.2) +
+    # geom_text(data = temp_thresholds, aes(x = x, y = y, label = lab), color = "red", hjust = 1, vjust = 0.25, size = 3) +
+    # geom_hline(data = h_line_highthr, aes(yintercept = y), color = "red", linetype = 2, alpha = 0.2) +
+    geom_ribbon(aes(x = target_end_date, ymin = q0.025, ymax = q0.975), alpha = 0.2) +
+    geom_ribbon(aes(x = target_end_date, ymin = q0.05, ymax = q0.95), alpha = 0.2) +
+    geom_ribbon(aes(x = target_end_date, ymin = q0.1, ymax = q0.9), alpha = 0.2) +
+    geom_ribbon(aes(x = target_end_date, ymin = q0.25, ymax = q0.75), alpha = 0.2) +
+    geom_point(data = truth_toplot %>% filter(target_type == i, location == "US"),
+                             size = 1, aes(x = date, y = value)) +
+    facet_wrap(~ a1) +
+    theme_bw() +
+    xlab(NULL) +
+    scale_x_continuous(breaks = breaks, expand = c(0,0), labels = format(breaks, "%b-%Y")) +
+    ggtitle(paste0("National ensemble projections - ", i)) +
+    theme(text = element_text(size=15),
+          axis.text.x = element_text(size=12, angle = 45, vjust =1, hjust=1),
+          axis.title = element_blank(),
+          legend.position = "none",
+          plot.title = element_text(size=16, hjust = 0),
+          plot.caption = element_text(hjust = 0.5),
+          # strip.background = element_blank(),
+          strip.placement = "outside") +
+    (if(i == "Deaths") {
+      labs(caption = "From lightest to darkest shading represents 95%, 90%, 80% and 50% projection intervals")
+    }) +
+    (if(i == "Hospitalizations") {
+      theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank()
+      )
+    })
+}
+
+plot1 <- cowplot::plot_grid(plotlist = plot, ncol = 1, align = "v", axis = "lr", rel_heights = c(1, 1.5))
+plot(plot1)
+
+ggsave(file.path(dir_path, "reports", paste0("round", round), "figures/trajectory_overall.png"),
+       plot = plot1, width = 10, height = 6)
+```
+\
+
+* **The majority of hospitalization and death burden from COVID-19 is expected to occur in individuals 65+**, with 56% of hospitalizations and 84% of deaths occurring in 65+ in the high-risk group recommendation scenario.
+
+
+```{r, echo = FALSE, warning = FALSE, fig.width = 11, fig.height=3.3}
+
+temp_hosp <- quant_data  %>% 
+  filter(scenario_id == "B-2025-04-01") %>%
+  filter(str_detect(target, "cum"), location == "US", model == "Ensemble", target_type == "Hospitalizations") %>%
+  filter(target_end_date == max(target_end_date)) %>%
+ mutate(agegroup = case_when(age_group == "0-130" ~ "Total population", 
+                              age_group == "0-64" ~ "Age 0-64", age_group == "65-130" ~ "Aged 65+")) %>%
+  dplyr::filter(quantile %in% c(0.025, 0.25, 0.50, 0.75, .975) & is.na(type)) %>%
+  mutate(quantile = as.character(quantile*100)) %>%
+  pivot_wider(names_from = quantile, names_prefix = "q")
+
+temp_death <- quant_data %>% 
+  filter(scenario_id == "B-2025-04-01") %>%
+  filter(str_detect(target, "cum"), location == "US", model == "Ensemble", target_type == "Deaths") %>%
+  filter(target_end_date == max(target_end_date)) %>%
+  mutate(agegroup = case_when(age_group == "0-130" ~ "Total population", 
+                              age_group == "0-64" ~ "Age 0-64", age_group == "65-130" ~ "Aged 65+")) %>%
+  dplyr::filter(quantile %in% c(0.025, 0.25, 0.50, 0.75, .975) & is.na(type)) %>%
+  mutate(quantile = as.character(quantile*100)) %>%
+  pivot_wider(names_from = quantile, names_prefix = "q")
+
+temp_hosp <- temp_hosp %>%
+  filter(scenario_id != names(scn_names)[1]) %>%
+  bind_rows(temp_hosp %>%
+              filter(scenario_id == names(scn_names)[1]) %>%
+              mutate(a2 = axis2[2],
+                     a2long = axis2_long[2])) %>%
+  bind_rows(temp_hosp %>%
+              filter(scenario_id == names(scn_names)[1]) %>%
+              mutate(a2 = axis2[3],
+                     a2long = axis2_long[3]))
+
+temp_death <- temp_death %>%
+  filter(scenario_id != names(scn_names)[1]) %>%
+  bind_rows(temp_death %>%
+              filter(scenario_id == names(scn_names)[1]) %>%
+              mutate(a2 = axis2[2],
+                     a2long = axis2_long[2])) %>%
+  bind_rows(temp_death %>%
+              filter(scenario_id == names(scn_names)[1]) %>%
+              mutate(a2 = axis2[3],
+                     a2long = axis2_long[3]))
+
+temp_outcomes <- temp_hosp %>% bind_rows(temp_death)
+
+plot2 <- temp_outcomes %>%
+  mutate(target_type = factor(target_type, levels = c("Hospitalizations", "Deaths"))) %>%
+  ggplot() +
+  geom_boxplot(aes(x = agegroup,color = agegroup, 
+                   ymin = q2.5, lower = q25, middle = q50, upper = q75, ymax = q97.5), stat = "identity") +
+  ggtitle("Cumulative COVID-19 hospitalizations and deaths projected in the US") +
+  labs(x = NULL,
+       y = "Cumulative counts", 
+       caption = paste0("Median ensemble projections with 50% and 95% projection intervals, ", 
+                        format(as.Date(projection.start.date), "%B %d, %Y"), " to ", 
+                        format(as.Date(projection.end.date), "%B %d, %Y"), "\nHigh-risk vaccination scenario")) +
+  facet_wrap(~target_type, ncol = 2, scales = "free_y") +
+  guides(colour = guide_legend(nrow = 1))+
+  scale_color_brewer(palette = "Set2")  +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = comma) +
+  theme_bw()+
+  theme(text = element_text(size=15),
+        axis.text.x = element_text(size=10), 
+        axis.title = element_blank(),
+        legend.position = "bottom",
+        legend.title = element_blank(),
+        plot.title = element_text(size=18, hjust = 0.5),
+        plot.caption = element_text(hjust = 0.5),
+        # strip.background = element_blank(),
+        strip.placement = "outside",
+        panel.spacing = unit(1, "cm", data = NULL))
+plot(plot2)
+
+ggsave(file.path(dir_path, "reports", paste0("round", round), "figures/cumulative_outcomes_0_130.png"),
+       plot = plot2, 
+       width = 11, height = 4)
+
+# temp_outcomes %>%
+#   filter(age_group != "0-130") %>%
+#   group_by(target) %>%
+#   mutate(med_prop = q50 / sum(q50, na.rm = TRUE)) %>%
+#   ungroup() %>%
+#   dplyr::select(age_group, target, med_prop)
+
+```
+
+
+
+
+\newpage    
+
+## Impact of Vaccination
+
+* **Both vaccination strategies are projected to significantly reduce disease burden compared to no vaccination**. 
+
+* **Compared to no vaccination, vaccination of high-risk groups reduces hospitalizations by 13% (8-17%) and deaths by 16% (11-23%)**, over the full time period. Vaccinating high-risk groups would result in 90,000 (53,000-126,000) fewer hospitalizations and 7,000 (4,000-9,000) fewer deaths nationally over the projection period, compared to no vaccination. 
+
+* **Vaccination for all age groups increases these reductions to 116,000 (69,000-163,000) hospitalizations and 9,000 (5,000-12,000) deaths averted.** As compared to vaccinating only 65+ and high-risk individuals, vaccinating all ages would prevent an extra 26,000 hospitalizations and 1,000 deaths. 
+
+![Overall pooled differences between scenarios among the total population](`r file.path(dir_path, "reports", paste0("round", round), "figures/combined_0_130.png")`)
+\
+
+* **The majority of the overall vaccination benefits (i.e., direct and indirect effects) is expected to come from reductions in this age group,** with 67,000 (38,000-96,000) hospitalizations and 6,000 (4,000-7,000) deaths averted among 65+ individuals in the high-risk group recommendation scenario compared to no vaccination.
+
+* **We estimate that indirect effects of universal vaccine recommendations could reduce disease burden by 4% among people 65+**, representing an additional ~12,000 hospitalizations and ~1,000 deaths averted among this age group. 
+
+
+
+\newpage
+
+## Impact of Vaccination Timing
+
+* **An earlier vaccination campaign is projected reduce COVID-19 outcomes**, compared to classic influenza vaccination timing. Moving the vaccination campaign 1.5 months earlier is projected to reduce the numbers of deaths by 3% (1-6%) and hospitalizations by 2% (-2-6%).
+
+![Overall pooled differences between timing scenarios among the total population](`r file.path(dir_path, "reports", paste0("round", round), "figures/combined_timing_0_130.png")`)
+\
+
+
+

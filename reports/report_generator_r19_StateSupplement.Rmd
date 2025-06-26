@@ -1,0 +1,309 @@
+---
+output: 
+  pdf_document: 
+    fig_caption: no
+header-includes:
+  - \usepackage{pdfpages}
+urlcolor: blue
+editor_options: 
+  chunk_output_type: console
+---
+
+\fontsize{11}{22}
+\renewcommand{\familydefault}{\sfdefault}
+
+# State Supplementary Results
+## COVID-19 Scenario Modeling Hub Report: Round 19 - 2025 to 2026 Season
+`r format(Sys.time(), '%d %B, %Y')`\
+Scenario Modeling Hub Team^[Compiled by Shaun Truelove, Sung-mok Jung, Lucie Contamin, Cécile Viboud, and Justin Lessler.]
+
+
+This supplementary report contains state-level results for each state. These results mirror those at the national level. See [covid19scenariomodelinghub.org](https://covid19scenariomodelinghub.org/) and the main report for more details.
+
+
+```{r setup, include=FALSE}
+
+
+rerun_metaanalysis <- TRUE
+
+### path to local version of repository
+#local_path <- "/Users/eah394/Documents/GitHub/"
+#local_path <- "C:/Users/clair/Documents/COVID/SMH/"
+# local_path <- "/Users/saraloo/Documents/SMH/COVID/"
+# local_path <- "C:/Users/ecarcele/Documents/JHUProjects/SMH/COVID/"
+
+
+local_path <- file.path(dirname(here::here()))
+this_path <- here::here()
+
+dir_path <- file.path(local_path, "covid19-scenario-hub_analysis")
+data_path <- file.path(local_path, "covid-19-smh_data")
+smh_path <- file.path(local_path, "covid19-scenario-modeling-hub")
+web_path <- file.path(local_path, "covid19-scenario-hub_website")
+
+# sys_call <- paste0("cd ", dir_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", data_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", web_path, "/ && git pull && timeout /t 30 /nobreak && ", 
+#               "cd ", this_path, "/")
+# system(sys_call)
+
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE,
+                      cache.lazy = FALSE,
+                      dev = 'pdf', 
+                      message=FALSE, cache=FALSE,
+                      include = FALSE)
+
+knitr::opts_knit$set(root.dir = dir_path)
+
+library(tidyverse)
+library(readr)
+library(scales)
+library(purrr)
+library(ggpmisc)
+library(usmap)
+library(reshape2)
+library(data.table)
+library(arrow)
+library(tidytext)
+library(lubridate)
+library(jsonlite)
+library(hubUtils)
+
+
+```
+
+```{r report_prep, message=FALSE, warning=FALSE, cache=FALSE, include=FALSE}
+# add to options to cache data build ---  
+
+# Get Round Metadata
+round_metadata <- hubUtils::read_config(smh_path, "tasks")
+round_id <- max(get_round_ids(round_metadata))
+folder_path <- file.path("model-processed", round_id)
+
+
+## choose scenario identifier and appropriate hosp file
+scenario.id <- "2025-04-01"
+projection.start.date <- round_id
+projection.end.date <- "2026-04-25"
+year_start <- 2025
+year_end <- 2026
+round <- 19
+ens_choice <- "Ensemble_LOP"
+pi_low <- 0.025
+pi_high <- 0.975  
+
+
+# load metadata on Round
+
+model_names <- list.dirs(file.path(data_path, "model-processed", round_id), 
+                         full.names = FALSE, 
+                         recursive = FALSE) 
+
+model_names <- c(model_names[grepl("Ensemble", model_names)], 
+                 model_names[!grepl("Ensemble", model_names)]) # put ensemble first
+
+
+# load(paste0(web_path,"visualization/data-visualization/sysdata.rda"))
+
+# Scenario name information - UPDATE EACH ROUND
+axis1 <- c("noBoo", "HighRiskVax", "allVax")
+axis2 <- c("noTiming", "classicTiming", "earlyTiming")
+axis1_long <- c("No booster", "65+ and high-risk booster", "All booster")
+axis2_long <- c("No Immunization", "Classic Immunization", "Early Immunization") 
+var_name1 <- "booster"
+var_name2 <- "timing"
+pessimistic <- paste0(axis1[1], "_", axis2[1]) # most pessimistic scenario to use for risk maps
+
+scn_combos <- list(
+  c(1,1),
+  c(2,2),
+  c(2,3),
+  c(3,2),
+  c(3,3)
+)
+
+# set the axis and scenario names and labels
+scn_names <- sapply(scn_combos, function(x) paste(axis1[x[1]], axis2[x[2]], sep = "_"))
+scenario_ids <- paste0(LETTERS[1:length(scn_names)], "-", scenario.id)
+a1 <- sapply(scn_combos, function(x) axis1[x[1]])
+a2 <- sapply(scn_combos, function(x) axis2[x[2]])
+a1long <- sapply(scn_combos, function(x) axis1_long[x[1]])
+a2long <- sapply(scn_combos, function(x) axis2_long[x[2]])
+
+
+
+# Locations
+
+# test data
+config_json <- hubUtils::read_config(smh_path, "tasks")
+schema <- hubData::create_hub_schema(config_json)
+
+# Prerequisite ======
+df_loc <- read.csv(file.path(smh_path, "auxiliary-data/data-locations/locations_2022.csv")) %>%
+  dplyr::select(-age_group, - population) %>% distinct()
+
+# Load data =====
+dc <- arrow::open_dataset(file.path(data_path, folder_path),
+                          partitioning = c("model_id", "target", "location"),
+                          hive_style = FALSE, schema = schema,
+                          factory_options = list(exclude_invalid_files = TRUE))
+locs_df <- dplyr::filter(dc, model_id == "Ensemble_LOP", 
+                         output_type == "quantile", output_type_id == 0.5,
+                         scenario_id == "B-2025-04-01",
+                         # scenario_id %in% c("A-2025-04-01", "B-2025-04-01"), 
+                         age_group == "0-130",
+                         target == "inc hosp") |> 
+  dplyr::collect() %>% dplyr::select(location) |> distinct()
+
+locs_df <- dplyr::left_join(locs_df, df_loc, by = c("location")) |>
+  dplyr::mutate(loc_numeric = as.integer(location)) %>%
+  dplyr::mutate(loc_numeric = ifelse(location == "US", 0, loc_numeric)) %>%
+  arrange(loc_numeric) %>%
+  dplyr::mutate(location = factor(location, levels = location)) %>%
+  arrange(location)
+
+```
+
+## Round 19 Scenario Specifications
+![Round 19 Scenario Specifications](`r file.path(smh_path,"auxiliary-data/rounds", paste0("round", round, "_viz"), paste0("covid19_round", round, ".png"))`)
+
+
+
+```{r run_states, include=FALSE, echo=FALSE, cache=FALSE, results='asis', eval = TRUE}
+
+# Loop through the three locations and knit child documents
+locs <- as.character(unique((locs_df %>% filter(location!="US"))$location))
+# locs <- c("01", "02", "04")
+# locs <- c("01")
+res <- vector(mode = "list", length = length(locs))
+
+
+panel_height <- 5.5
+
+unmatched_models <- NA
+numdiff_for_text <- NULL
+reldiff_for_text <- NULL
+
+# for (i in locs) {
+  
+  # loc_select <- i
+  # loc_name <- locs_df$location_name[locs_df$location == loc_select]
+  # loc_abbr <- locs_df$abbreviation[locs_df$location == loc_select]
+  # 
+  # # print(getwd())
+  # 
+  # loc_subname <- ifelse(loc_select == "US", "", paste0("_", loc_abbr))
+  # 
+  # # load data from the round for trajectories
+  # # source(file.path(dir_path,"code/R/read_sample_files.R"), local = knitr::knit_global())
+  # source(file.path(dir_path,"code/R/read_sample_files_locs.R"), local = FALSE)
+  # 
+  # # Run each meta analysis
+  # 
+  # # overall
+  # panel_height <- 7.5
+  # age_group_tmp <- "0-130"
+  # age_group_label <- "Overall"
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = FALSE)
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  # # 0-64
+  # panel_height <- 7
+  # age_group_tmp <- "0-64"
+  # age_group_label <- "0-64"
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = knitr::knit_global())
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  # # 65+
+  # panel_height <- 7
+  # age_group_tmp <- "65-130"
+  # age_group_label <- "65+"
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_overall.R"), local = knitr::knit_global())
+  # source(file.path(dir_path,"code/R/sample_based_effect_estimates_timing.R"), local = knitr::knit_global())
+  # 
+  # gc()
+  # rm(df_sample)
+  # gc()
+  # 
+  # # set the location in the environment
+  # assign("loc_select", loc_select, envir = environment())
+  # assign("loc_name", loc_name, envir = environment())
+  # assign("loc_abbr", loc_abbr, envir = environment())
+  
+  # # knit the child document
+  # res[[i]] <- knitr::knit_child("reports/report_generator_r19_StateSupplement_test.Rmd", quiet = TRUE, envir = environment())
+  
+# }
+# cat(unlist(res), sep = '\n')
+
+```
+
+
+```{r, include=FALSE, echo=FALSE, cache=FALSE, results='asis', eval=TRUE}
+
+out2 <- lapply(
+  unique(locs),
+  FUN = function(x) {
+    
+    loc_select <- x
+    loc_name <- locs_df$location_name[locs_df$location == loc_select]
+    loc_abbr <- locs_df$abbreviation[locs_df$location == loc_select]
+    
+    # set the location in the environment
+    assign("loc_select", loc_select, envir = environment())
+    assign("loc_name", loc_name, envir = environment())
+    assign("loc_abbr", loc_abbr, envir = environment())
+    
+    knitr::knit_expand(
+      file = "reports/report_generator_r19_StateSupplement_source.Rmd",
+      loc_select = loc_select
+    )
+  }
+)
+```
+
+
+```{r, include=TRUE, echo=FALSE, cache=FALSE, results='asis', eval=TRUE}
+
+res <- knitr::knit_child(text = unlist(out2), quiet = TRUE)
+cat(res, sep = '\n')
+
+```
+
+
+
+\newpage
+
+# Teams and Models
+- Center for Forecasting and Outbreak Analytics (CFA) - CFA-Scenarios
+  * Laura Albrecht, Elisha Are, Michael Batista, Ariel Shurygin, Kok Ben Toh, Thomas Hladish
+- Johns Hopkins and UNC ID Dynamics  — JHU_UNC-flepiMoP
+  * Anjalika Nande (JHU IDD), Sara Loo (Johns Hopkins Infectious Disease Dynamics [JHU IDD]), Joseph C. Lemaitre (University of North Carolina at Chapel Hill [UNC]), Timothy Willard (UNC), Carl Pearson (UNC), Allison Hill (JHU IDD), Justin Lessler (JHU IDD, UNC), Shaun Truelove (JHU IDD)
+- Northeastern University MOBS Lab — MOBS_NEU-GLEAM_COVID
+  * Matteo Chinazzi (Laboratory for the Modeling of Biological and Socio-technical Systems, Northeastern University, Boston, MA [NEU]), Jessica T. Davis (NEU), Alessandro Vespignani (NEU)
+- University of Illinois at Urbana-Champaign - UIUC-IMMCYC
+  * Soren L Larsen (UIUC)
+- University of North Carolina at Charlotte - UNCC-Hierbin
+  * Shi Chen (UNCC Dept. of Public Health Sciences & School of Data Science), Rajib Paul (UNCC Dept. of Public Health Sciences and School of Data Science), Daniel Janies (UNCC Dept. of Bioinformatics and Genomics)
+- University of Texas at Austin - ImmunoSEIRS
+  * Shraddha Ramdas Bandekar (UTA), Anass Bouchnita (UT-El Paso), Spencer Fox (University of Georgia), Michael Lachmann (UTA), Lauren Ancel Meyers (UTA)
+- University of Virginia — Adaptive
+  * Przemyslaw Porebski (UVA), Srini Venkatramanan (UVA), Bryan Lewis (UVA), Aniruddha Adiga (UVA), Jiangzhuo Chen (UVA), Anil Vullikanti (UVA), Madhav Marathe (UVA)
+- Predictive Science - PSI-M_CoV_2025
+  * Jamie Turtle, Michal Ben-Nun, Pete Riley
+
+## The COVID-19 Scenario Modeling Hub Team
+- Justin Lessler, University of North Carolina, Chapel Hill
+- Cécile Viboud, NIH Fogarty
+- Shaun Truelove, Johns Hopkins University
+- Katriona Shea, Penn State University
+- Claire Smith, University of North Carolina, Chapel Hill
+- Emily Howerton, Penn State University
+- Harry Hochheiser, University of Pittsburgh
+- Michael Runge, USGS
+- Lucie Contamin, University of Pittsburgh
+- Sara Loo, Johns Hopkins University
+- Sung-mok Jung, University of North Carolina, Chapel Hill
+- Erica Carcelén, Johns Hopkins University
+- Hidetoshi Inamine, Penn State University
+
+
