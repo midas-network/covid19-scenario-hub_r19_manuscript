@@ -7,6 +7,7 @@ and auxiliary data
 `data-locations`: contains the location name and ID used in the files  
 `model-metadata`: contains the metadata associated with each model   
 `model-processed`: contains the "processed" data
+`obs-data`: contains the "observed" data
 
 ### "Processed" Data
 
@@ -91,4 +92,32 @@ df <- hubData::connect_model_output(paste0(repo_path, folder_path),
 ```
 *Remarks*: As the round contains lot of data, it's highly recommended to 
 filter before collecting the data. 
+
+### Observed Data
+
+### Death
  
+[National Center for Health Statistics (NCHS) Mortality Surveillance
+Data](https://www.cdc.gov/flu/weekly/overview.htm#NCHSMortality) 
+data for weekly incidence COVID-19 deaths extracted from the 
+[FluView Interactive - Mortality](https://gis.cdc.gov/grasp/fluview/mortality.html) 
+CDC dashboard will be used for incidence death target . These data are 
+weekly and pertain to date of death, not report date. 
+
+### Hospitalization
+
+Weekly Hospital Respiratory Data (HRD) Metrics by Jurisdiction from
+the [National Healthcare Safety Network (NHSN)](https://data.cdc.gov/Public-Health-Surveillance/Weekly-Hospital-Respiratory-Data-HRD-Metrics-by-Ju/ua7e-t2fy/about_data) will be used for incidence hospitalization
+target. The data are weekly. 
+
+#### Emergency Department Visit
+
+National Syndromic Surveillance Program data on weekly emergency departments
+visits:
+- [National with demographic information](https://data.cdc.gov/Public-Health-Surveillance/NSSP-Emergency-Department-Visits-COVID-19-Flu-RSV-/7xva-uux8/about_data)
+- [State level](https://data.cdc.gov/Public-Health-Surveillance/2023-Respiratory-Virus-Response-NSSP-Emergency-Dep/vutn-jzwm/about_data)
+
+
+
+
+
