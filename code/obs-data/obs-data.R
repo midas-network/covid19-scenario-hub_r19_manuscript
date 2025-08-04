@@ -116,6 +116,7 @@ df_ed_demo <- read.csv(paste0(cdc_api,
 
 df_ed_state <- read.csv(paste0(cdc_api,
                                "vutn-jzwm/rows.csv?&accessType=DOWNLOAD")) |>
+  dplyr::filter(pathogen == "COVID-19") |>
   dplyr::mutate(location = location2number[geography],
                 age_group = "0-130", target = "% ed visit") |>
   dplyr::select(location, date = week_end, observation = percent_visits,
