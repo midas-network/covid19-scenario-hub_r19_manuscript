@@ -1,0 +1,1229 @@
+---
+title: "Vaccine + wave timing analysis"
+output: html_notebook
+---
+
+## Setup
+```{r setup, include=FALSE}
+
+library(arrow)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(MMWRweek)
+library(ggpmisc)
+library(mclust)
+library(tidyverse)
+library(broom)
+library(RColorBrewer)
+
+```
+
+## File paths
+```{r}
+
+# Path to the current repo (cloned from https://github.com/midas-network/covid19-scenario-hub_r19_manuscript)
+#repo_path <- "~/Dropbox/GitReps/covid19-scenario-hub_r19_manuscript/"  
+repo_path <- "~/Documents/GitHub/covid19-scenario-hub_r19_manuscript/"
+folder_path <- "data/model-processed/"
+
+#plot_path = "~/Dropbox/CSJT01/smh_covid_r19/manuscript/analysis/plots"
+plot_path = "~/Library/CloudStorage/Box-Box/SMH Rounds/Round19ManuscriptPlots/Plots"
+
+```
+
+## Bookkeeping
+```{r}
+proj_start_date = as.Date("2025-04-27")
+
+scenario_ids = c("A-2025-04-01", "B-2025-04-01", "C-2025-04-01", 
+                 "D-2025-04-01", "E-2025-04-01")
+scenarios = c("A", "B", "C", "D", "E")
+
+# Establish schema
+schema <- arrow::schema(
+  arrow::field("origin_date", arrow::string()),
+  arrow::field("scenario_id", arrow::string()),
+  arrow::field("location", arrow::string()),
+  arrow::field("target", arrow::string()),
+  arrow::field("horizon", arrow::int64()),
+  arrow::field("output_type", arrow::string()),
+  arrow::field("output_type_id", arrow::int64()),
+  arrow::field("age_group", arrow::string()),
+  arrow::field("model_id", arrow::string()),
+  arrow::field("value", arrow::float64()),
+)
+
+# declare models that will be up-sampled
+upsamp_mods = c("UNCC-Hierbin", "UT-ImmunoSEIRS", "UVA-adaptive", "UIUC-IMMCYC")
+
+# for converting projection-horizon week to epi week
+proj_week_dates = proj_start_date + (0:51)*7
+proj_MMWR = MMWRweek(proj_week_dates)
+
+palette <- c("#e89f00", "#019e72", "#322288", "#57b4e9", "#f1e541", "#cc79a7","#d55e00","#0472b2")
+
+```
+
+## Initial analysis of individual scenarios
+
+```{r}
+
+# --- Initial analysis of individual scenarios -------------------------
+
+for (ii in 1:5) {
+  scenario = scenarios[ii]
+  # plotting filename/path
+  filename_median = file.path(plot_path, paste0("Nat_wave_prop_medianW", scenario, ".png"))
+  filename = file.path(plot_path, paste0("Nat_wave_prop", scenario, ".png"))
+  
+  # extract national hospitalization trajectories
+  df <- arrow::open_dataset(paste0(repo_path, folder_path), schema = schema,
+                            partitioning = c("origin_date", "model_id", 
+                                             "target", "location")) |>
+    dplyr::filter(output_type == "sample", 
+                  origin_date == "2025-04-27", scenario_id == scenario_ids[ii],
+                  target == "inc hosp", age_group == "0-130") |>
+    dplyr::collect()
+  
+  # find a median week for each trajectory
+  df_median_horizon <- df %>%
+    group_by(model_id, output_type_id, location) %>%
+    arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+    mutate(
+      cum_value = cumsum(value),
+      total_value = sum(value),
+      prop_cum = cum_value / total_value
+    ) %>%
+    filter(prop_cum >= 0.5) %>%
+    slice_min(prop_cum, with_ties = FALSE) %>%
+    select(model_id, output_type_id, location, median_horizon = horizon, cumulative_value = cum_value)
+  
+  # convert horizon week to MMWR epi week
+  df_median_horizon$ew = proj_MMWR$MMWRweek[df_median_horizon$median_horizon]
+  
+  # up-sample models so they all have 300 results
+  # Split into rows to repeat 
+  to_repeat <- df_median_horizon %>%
+    filter(model_id %in% upsamp_mods)
+  
+  repeated_rows <- to_repeat[rep(seq_len(nrow(to_repeat)), each = 3), ]
+  
+  # Combine with unmodified rows
+  df_median_upsamp <- bind_rows(
+    df_median_horizon %>% filter(!model_id %in% upsamp_mods),
+    repeated_rows
+  )
+  
+  # plot all trajectory medians
+  tick_seq = seq(from=1, to=52, by=3)
+  p1 = ggplot(df_median_upsamp %>% 
+                filter(location == "US") %>%
+                mutate(model_id = case_when(
+                  model_id == "CFA-Scenarios" ~ "Model 1",
+                  model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+                  model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+                  model_id == "PSI-M_CoV_2025" ~ "Model 4",
+                  model_id == "UIUC-IMMCYC" ~ "Model 5",
+                  model_id == "UNCC-Hierbin" ~ "Model 6",
+                  model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+                  model_id == "UVA-adaptive" ~ "Model 8"
+                ))
+                , aes(x=median_horizon, fill=model_id)) +
+    geom_histogram(binwidth=1, position="stack", boundary=0.5, closed="left") +
+    scale_x_continuous(
+      breaks = (1:52)[tick_seq],
+      labels = proj_MMWR$MMWRweek[tick_seq]
+    ) +
+    scale_fill_manual("", values = palette) +
+    labs(
+      x="Median Hospitalization Week",
+      y="Number of Trajectories",
+      fill="Model",
+      title=paste0("Median Hospitalization Week - Scenario ", scenario)
+    ) +
+    theme_minimal()
+  
+  ggsave(filename_median, p1, width = 20, height = 10, bg = "white")
+  
+  
+  # arbitrarily declare EW 43 as the divider between summer and winter waves
+  # cumulatives below 45% are 'winter', greater than 55% are 'summer', in
+  # between is 'similar'
+  
+  # find proportion of cumulative at horizon==26
+  df_prop_cum <- df %>%
+    group_by(model_id, output_type_id, location) %>%
+    arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+    mutate(
+      cum_value = cumsum(value),
+      total_value = sum(value),
+      prop_cum = cum_value / total_value
+    ) %>%
+    filter(horizon == 26) %>%
+    select(model_id, output_type_id, location, prop_cum=prop_cum)
+  
+  # up-sample models so they all have 300 results
+  # Split into rows to repeat and others
+  to_repeat <- df_prop_cum %>%
+    filter(model_id %in% upsamp_mods)
+  
+  repeated_rows <- to_repeat[rep(seq_len(nrow(to_repeat)), each = 3), ]
+  
+  # Combine with unmodified rows
+  df_prop_upsamp <- bind_rows(
+    df_prop_cum %>% filter(!model_id %in% upsamp_mods),
+    repeated_rows
+  )
+  
+  # Do the actual binning
+  breaks = c(0., 0.45, 0.55, 1.0000000001)
+  labels = c("Winter", "Similar", "Summer")
+  
+  df_binned = df_prop_upsamp %>%
+    mutate(bin = cut(prop_cum, breaks = breaks, labels = labels, right = FALSE)) %>%
+    count(bin, model_id, location)  # Get counts per bin per model/location
+  # reorder bin names for plotting
+  df_binned$bin = factor(df_binned$bin, levels=rev(labels))
+  
+  df_binned_save <- df_binned %>% 
+                left_join(read_csv("locations.csv"), by = "location") %>%
+                mutate(abbreviation = fct_relevel(abbreviation, c("US"))) %>%
+                mutate(model_id = case_when(
+                  model_id == "CFA-Scenarios" ~ "Model 1",
+                  model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+                  model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+                  model_id == "PSI-M_CoV_2025" ~ "Model 4",
+                  model_id == "UIUC-IMMCYC" ~ "Model 5",
+                  model_id == "UNCC-Hierbin" ~ "Model 6",
+                  model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+                  model_id == "UVA-adaptive" ~ "Model 8"
+                ))
+  
+  write_csv(df_binned_save, paste("data/binned_locations_scenario_", scenario, ".csv", sep = ""))
+  
+  p2 = ggplot(df_binned %>%
+                left_join(read_csv("locations.csv"), by = "location") %>%
+                mutate(abbreviation = fct_relevel(abbreviation, c("US"))) %>%
+                mutate(model_id = case_when(
+                  model_id == "CFA-Scenarios" ~ "Model 1",
+                  model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+                  model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+                  model_id == "PSI-M_CoV_2025" ~ "Model 4",
+                  model_id == "UIUC-IMMCYC" ~ "Model 5",
+                  model_id == "UNCC-Hierbin" ~ "Model 6",
+                  model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+                  model_id == "UVA-adaptive" ~ "Model 8"
+                ))
+                ,
+                #filter(location == "US"), 
+              aes(x = bin, y = n, fill = model_id)) +
+    facet_wrap(~abbreviation) + 
+    geom_col(position = "stack") +
+    scale_fill_manual("", values = palette) +
+    labs(
+      x = "EW 43 Cumulative Proportion",
+      y = "Number of Trajectories",
+      fill = "Model",
+      title = paste0("EW 43 Cumulative Proportion - Scenario ", scenario)
+    ) +
+    theme_minimal()
+  
+  ggsave(filename, p2, width = 20, height = 10, bg = "white")
+}
+
+```
+
+
+
+## Aggregate bars per location
+```{r}
+
+## code to generate file for piecharts in Figure S8
+
+location_aggregated_bars <- read_csv("data/binned_locations_scenario_A.csv") %>%
+  group_by(location_name, abbreviation, bin) %>%
+  reframe(count_bins = sum(n)) %>%
+  ungroup() %>%
+  group_by(location_name, abbreviation) %>%
+  mutate(count_total = sum(count_bins)) %>%
+  ungroup() %>%
+  mutate(proportion_bins = count_bins/count_total)
+
+write_csv(location_aggregated_bars, "data/location_bins_Scenario_A_for_piechart.csv")
+
+```
+
+
+## Now repeat, comparing scenario totals to counterfactual
+```{r}
+
+
+# --- Now repeat, comparing scenario totals to counterfactual --------------
+ii = 1
+scenario = scenarios[ii]
+
+df <- arrow::open_dataset(paste0(repo_path, folder_path), schema = schema,
+                          partitioning = c("origin_date", "model_id", 
+                                           "target", "location")) |>
+  dplyr::filter(output_type == "sample",  
+                origin_date == "2025-04-27", scenario_id == scenario_ids[ii],
+                target == "inc hosp", age_group == "0-130") |>
+  dplyr::collect()
+
+
+# arbitrarily declare EW 43 as the divider between summer and winter waves
+# cumulatives below 40% are 'summer', greater than 40% are 'winter'
+
+# find proportion of cumulative at horizon==26
+df_prop_cum_a <- df %>%
+  group_by(model_id, output_type_id, location) %>%
+  arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+  mutate(
+    cum_value = cumsum(value),
+    total_value = sum(value),
+    prop_cum = cum_value / total_value
+  ) %>%
+  mutate(half_week = if_else(
+    prop_cum >= 0.5, "Post", "Pre")
+    ) %>%
+  ## want the minimum week in the Post group 
+  group_by(model_id, output_type_id, location, half_week) %>%
+  ## group by half_week and if we are in the half_week == Post group, then set it to minimum horizon of that group
+  ## If we are in the Pre group, set it to -1
+  mutate(half_week2 = if_else(half_week == "Post", min(horizon), -1)) %>%
+  ungroup() %>%
+  group_by(model_id, output_type_id, location) %>%
+  ## then grab the max across both pre/post, which will return min of post
+  mutate(median_horizon = max(half_week2)) %>%
+  filter(horizon == 26) %>%
+  select(model_id, output_type_id, location, prop_cum=prop_cum, median_horizon, tot=total_value)
+
+# up-sample models so they all have 300 results
+# Split into rows to repeat and others
+to_repeat <- df_prop_cum_a %>%
+  filter(model_id %in% upsamp_mods)
+
+repeated_rows <- to_repeat[rep(seq_len(nrow(to_repeat)), each = 3), ]
+
+# Combine with unmodified rows
+df_prop_upsamp_a <- bind_rows(
+  df_prop_cum_a %>% filter(!model_id %in% upsamp_mods),
+  repeated_rows
+)
+
+breaks = c(0., 0.45, 0.55, 1.0000000001)
+labels = c("Winter", "Similar", "Summer")
+
+df_binned_a = df_prop_upsamp_a %>%
+  mutate(bin = cut(prop_cum, breaks = breaks, labels = labels, right = FALSE)) 
+#   %>% count(bin, model_id)  # Get counts per bin per model
+
+df_binned = df_prop_upsamp_a %>%
+  mutate(bin = cut(prop_cum, breaks = breaks, labels = labels, right = FALSE)) %>% 
+  count(bin, model_id, location)  # Get counts per bin per model/location
+
+p2 = ggplot(df_binned %>% filter(location == "US") %>%
+              mutate(model_id = case_when(
+                model_id == "CFA-Scenarios" ~ "Model 1",
+                model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+                model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+                model_id == "PSI-M_CoV_2025" ~ "Model 4",
+                model_id == "UIUC-IMMCYC" ~ "Model 5",
+                model_id == "UNCC-Hierbin" ~ "Model 6",
+                model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+                model_id == "UVA-adaptive" ~ "Model 8"
+              ))
+              , aes(x = bin, y = n, fill = model_id)) +
+  geom_col(position = "stack") +
+  scale_fill_manual("", values = palette) +
+  labs(
+    x = "EW 43 Cumulative Proportion",
+    y = "Number of Trajectories",
+    fill = "Model",
+    title = paste0("EW 43 Cumulative Proportion - Scenario ", scenario)
+  ) +
+  theme_minimal()
+
+
+for (ii in 2:5) {
+  scenario = scenarios[ii]
+  df <- arrow::open_dataset(paste0(repo_path, folder_path), schema = schema,
+                            partitioning = c("origin_date", "model_id", 
+                                             "target", "location")) |>
+    dplyr::filter(output_type == "sample",  
+                  origin_date == "2025-04-27", scenario_id == scenario_ids[ii],
+                  target == "inc hosp", age_group == "0-130") |>
+    dplyr::collect()
+  
+  #load_time = Sys.time() - start_time
+  
+  # arbitrarily declare EW 43 as the divider between summer and winter waves
+  # cumulatives below 40% are 'summer', greater than 40% are 'winter'
+  
+  # find proportion of cumulative at horizon==26
+  df_prop_cum_temp <- df %>%
+    group_by(model_id, output_type_id, location) %>%
+    arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+    mutate(
+      cum_value = cumsum(value),
+      total_value = sum(value),
+      prop_cum = cum_value / total_value
+    ) %>%
+    mutate(half_week = if_else(
+      prop_cum >= 0.5, "Post", "Pre")
+    ) %>%
+    ## want the minimum week in the Post group 
+    group_by(model_id, output_type_id, location, half_week) %>%
+    ## group by half_week and if we are in the half_week == Post group, then set it to minimum horizon of that group
+    ## If we are in the Pre group, set it to -1
+    mutate(half_week2 = if_else(half_week == "Post", min(horizon), -1)) %>%
+    ungroup() %>%
+    group_by(model_id, output_type_id, location) %>%
+    ## then grab the max across both pre/post, which will return min of post
+    mutate(median_horizon = max(half_week2)) %>%
+    filter(horizon == 26) %>%
+    select(model_id, output_type_id, location, prop_cum=prop_cum, median_horizon, tot=total_value)
+  
+  # up-sample models so they all have 300 results
+  # Split into rows to repeat and others
+  to_repeat <- df_prop_cum_temp %>%
+    filter(model_id %in% upsamp_mods)
+  
+  repeated_rows <- to_repeat[rep(seq_len(nrow(to_repeat)), each = 3), ]
+  
+  # Combine with unmodified rows
+  df_prop_upsamp_temp <- bind_rows(
+    df_prop_cum_temp %>% filter(!model_id %in% upsamp_mods),
+    repeated_rows
+  )
+  
+  breaks = c(0., 0.45, 0.55, 1.0000000001)
+  labels = c("Winter", "Similar", "Summer")
+  
+  df_binned_temp = df_prop_upsamp_temp %>%
+    mutate(bin = cut(prop_cum, breaks = breaks, labels = labels, right = FALSE)) 
+  
+  var_name_base = paste0("scen", scenario, "_")
+  df_prop_upsamp_a[[paste0(var_name_base, "tot")]] = df_prop_upsamp_temp$tot
+  df_binned_a[[paste0(var_name_base, "bin")]] = df_binned_temp$bin
+}
+
+# add columns for the difference between B/C and D/E
+df_prop_upsamp_a[["diff_BC"]] = df_prop_upsamp_a$scenC_tot - df_prop_upsamp_a$scenB_tot
+df_prop_upsamp_a[["diff_DE"]] = df_prop_upsamp_a$scenE_tot - df_prop_upsamp_a$scenD_tot
+
+# now loop through B to E and collect relative averted
+df_averted = df_prop_upsamp_a[, 1:4]
+df_averted_long = data.frame(scenario=character(), timing=character(),
+                             location = character(),
+                             model_id = character(),
+                             prop_cum = numeric(),
+                             median_horizon = numeric(),
+                             rel_vec_perc=numeric())
+
+## for each of B-E
+for (ii in 2:5) {
+  scenario = scenarios[ii]
+  
+  rel_avert = (df_prop_upsamp_a$tot - 
+                 df_prop_upsamp_a[[paste0("scen", scenario, "_tot")]])/df_prop_upsamp_a$tot
+  df_averted[[scenario]] = rel_avert
+  
+  ## for each wave timing
+  for (jj in 3:1) {
+    timing_label = labels[jj]
+    timing_index = df_binned_a$bin == timing_label
+    rel_vec = as.vector(unlist(df_averted[timing_index, scenario]))
+    rel_vec_perc = rel_vec*100
+    
+    location <- df_binned_a[df_binned_a$bin == timing_label, ]$location
+    model_id <- df_binned_a[df_binned_a$bin == timing_label, ]$model_id
+    prop_cum <- df_binned_a[df_binned_a$bin == timing_label, ]$prop_cum
+    median_horizon <- df_binned_a[df_binned_a$bin == timing_label, ]$median_horizon
+    
+
+    df_averted_long = rbind(df_averted_long, 
+                            data.frame(scenario=scenario, 
+                                       timing=timing_label,
+                                       location = location,
+                                       model_id = model_id,
+                                       prop_cum = prop_cum,
+                                       median_horizon = median_horizon,
+                                       rel_vec_perc=rel_vec_perc))
+  }
+}
+
+
+
+# add columns for the relative difference between B/C and D/E
+df_averted[["diff_BC"]] = df_averted$C - df_averted$B
+df_averted[["diff_DE"]] = df_averted$E - df_averted$D
+
+# convert timing column to a factor to preserve ordering in plots
+df_averted_long$timing = factor(df_averted_long$timing, 
+                                levels = unique(df_averted_long$timing))
+
+# for each scenario, make an averted plot by timing - Summer, Similar, Winter 
+y_lims = c(0, 50)
+p_avert = list()
+for (jj in 2:5) {
+  scenario = scenarios[jj]
+  
+  scen_df = df_averted_long[df_averted_long$scenario==scenario, ]
+  p_avert[[scenario]] = ggplot(scen_df %>% filter(location == "US")
+                                 , aes(x=timing, y=rel_vec_perc)) +
+    geom_boxplot() +
+    coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+    theme_minimal() +
+    labs(x="Timing", y="Percent Hospital Admissions Averted", 
+         title = paste0("Scenario ", scenario))
+  
+  
+}
+
+
+combined_plot = p_avert$B / p_avert$C / p_avert$D / p_avert$E
+filename = file.path(plot_path, "Nat_avert_timing.png")
+ggsave(filename, combined_plot, width = 14, height = 30)
+
+
+
+# Collapse these plots into C vs B, and E vs D
+df_averted_diff_long = data.frame(scenario=character(), timing=character(), 
+                                  location = character(),
+                                  model_id = character(),
+                                  prop_cum = numeric(),
+                                  median_horizon = numeric(),
+                                  rel_vec_perc=numeric())
+slice_names = c("diff_BC", "diff_DE")
+for (ii in c(2, 4)) {
+  slice = slice_names[ii/2]
+  rel_avert = df_averted[[slice]]
+  for (jj in 3:1) {
+    timing_label = labels[jj]
+    timing_index = df_binned_a$bin == timing_label
+    rel_vec_perc = rel_avert[timing_index]*100
+    
+    location <- df_binned_a[df_binned_a$bin == timing_label, ]$location
+    model_id <- df_binned_a[df_binned_a$bin == timing_label, ]$model_id
+    prop_cum <- df_binned_a[df_binned_a$bin == timing_label, ]$prop_cum
+    median_horizon <- df_binned_a[df_binned_a$bin == timing_label, ]$median_horizon
+    
+    
+    
+    
+    df_averted_diff_long = rbind(df_averted_diff_long, 
+                                 data.frame(scenario=slice, timing=timing_label,
+                                            location =location,
+                                            model_id = model_id,
+                                            prop_cum = prop_cum,
+                                            median_horizon = median_horizon,
+                                            rel_vec_perc=rel_vec_perc))
+  }
+}
+
+# convert timing column to a factor to preserve ordering in plots
+df_averted_diff_long$timing = factor(df_averted_diff_long$timing, 
+                                     levels = unique(df_averted_diff_long$timing))
+
+# for each scenario comparison, make an averted plot by timing - Summer, Similar, Winter 
+y_lims = c(-15, 15)
+p_diff_avert = list()
+for (jj in 1:2) {
+  slice = slice_names[jj]
+  
+  if (jj==1) {
+    title = "Difference Percent Averted (C-B)/A"
+  } else if (jj==2) {
+    title = "Difference Percent Averted (E-D)/A"
+  }
+  
+  scen_df = df_averted_diff_long[df_averted_diff_long$scenario==slice, ]
+  p_diff_avert[[slice]] = ggplot(scen_df %>% filter(location == "US"), aes(x=timing, y=rel_vec_perc)) +
+    geom_boxplot() +
+    coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+    #coord_flip() +
+    theme_minimal() +
+    labs(x="Timing", y="Percent Hospital Admissions Averted", 
+         title = title)
+  
+  
+}
+
+combined_plot = p_diff_avert$diff_BC / p_diff_avert$diff_DE
+filename = file.path(plot_path, "Nat_avert_compare_timing.png")
+ggsave(filename, combined_plot, width = 14, height = 20)
+
+```
+
+## Reassign model names and save data
+
+```{r}
+# -------- Reassign model names and save data -----------------
+
+df_averted_long <- df_averted_long %>%
+  mutate(model_id = case_when(
+    model_id == "CFA-Scenarios" ~ "Model 1",
+    model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+    model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+    model_id == "PSI-M_CoV_2025" ~ "Model 4",
+    model_id == "UIUC-IMMCYC" ~ "Model 5",
+    model_id == "UNCC-Hierbin" ~ "Model 6",
+    model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+    model_id == "UVA-adaptive" ~ "Model 8"
+  ))
+write_csv(df_averted_long, "data/df_averted_long.csv")
+
+df_averted_diff_long <- df_averted_diff_long %>%
+  mutate(model_id = case_when(
+    model_id == "CFA-Scenarios" ~ "Model 1",
+    model_id == "JHU_UNC-flepiMoP" ~ "Model 2",
+    model_id == "MOBS_NEU-GLEAM_COVID" ~ "Model 3",
+    model_id == "PSI-M_CoV_2025" ~ "Model 4",
+    model_id == "UIUC-IMMCYC" ~ "Model 5",
+    model_id == "UNCC-Hierbin" ~ "Model 6",
+    model_id == "UT-ImmunoSEIRS" ~ "Model 7",
+    model_id == "UVA-adaptive" ~ "Model 8"
+  ))
+write_csv(df_averted_diff_long, "data/df_averted_diff_long.csv")
+
+```
+
+
+## Regression analysis 
+```{r}
+######## Regression analysis ########
+
+list_of_scenario_model_location <- df_averted_long %>%
+  select(model_id, scenario, location) %>%
+  distinct()
+
+
+states_regression <- NULL
+
+for (i in 1:nrow(list_of_scenario_model_location)){
+  ## set scenario, model, location combination
+  scenario2 <- list_of_scenario_model_location$scenario[i]
+  model_id2 <- list_of_scenario_model_location$model_id[i]
+  location2 <- list_of_scenario_model_location$location[i]
+  ## filter
+  df_states_regression <- df_averted_long %>%
+    filter(scenario == scenario2, model_id == model_id2, location == location2)# %>%
+    #filter(model_id == "UT-ImmunoSEIRS", location == "02", scenario == "B")
+  ## run linear regression, rel averted response to median horizon
+  model <- lm(rel_vec_perc ~ median_horizon, data = df_states_regression)
+  ## tidy model and pull coefficient
+  x <- tidy(model) %>% filter(term == "median_horizon") %>%
+    select(estimate)
+  ## create corresponding row in data frame
+  df_states_regression <- tibble(scenario = scenario2, model_id = model_id2, location = location2, coeff = x$estimate[1])
+  ## add to states regression
+  states_regression <- states_regression %>% rbind(df_states_regression)
+}
+
+write_csv(states_regression, "data/states_regression.csv")
+
+
+list_of_scenario_model_location_diff <- df_averted_diff_long %>%
+  select(model_id, scenario, location) %>%
+  distinct()
+
+states_regression_diff <- NULL
+
+for (i in 1:nrow(list_of_scenario_model_location_diff)){
+  ## set scenario, model, location combination
+  scenario2 <- list_of_scenario_model_location_diff$scenario[i]
+  model_id2 <- list_of_scenario_model_location_diff$model_id[i]
+  location2 <- list_of_scenario_model_location_diff$location[i]
+  ## filter
+  df_states_regression_diff <- df_averted_diff_long %>%
+    filter(scenario == scenario2, model_id == model_id2, location == location2)
+  ## run linear regression, rel averted response to median horizon
+  model <- lm(rel_vec_perc ~ median_horizon, data = df_states_regression_diff)
+  ## tidy model and pull coefficient
+  x <- tidy(model) %>% filter(term == "median_horizon") %>%
+    select(estimate)
+  ## create corresponding row in data frame
+  df_states_regression_diff <- tibble(scenario = scenario2, model_id = model_id2, location = location2, coeff = x$estimate[1])
+  ## add to states regression
+  states_regression_diff <- states_regression_diff %>% rbind(df_states_regression_diff)
+}
+
+write_csv(states_regression_diff, "data/states_regression_diff.csv")
+
+```
+
+
+
+## Figures
+### Percent averted by model
+```{r}
+palette <- c("#e89f00", "#019e72", "#322288", "#57b4e9", "#f1e541", "#cc79a7","#d55e00","#0472b2")
+
+## --- Percent averted -------------------------
+# test <- df_averted_diff_long %>% select(scenario, timing, location, model_id, rel_vec_perc, prop_cum) %>% filter(location == "US") %>% distinct() %>%  mutate(count = 1) %>% group_by(scenario, timing, location, model_id) %>% summarise(countall = sum(count)) %>% ungroup()
+plot_model_segregation <- ggplot(df_averted_long %>% filter(location == "US", !(model_id == "UIUC-IMMCYC" & location == "US"& timing == "Winter")), aes(x=timing, y=rel_vec_perc)) +
+  geom_boxplot() +
+  coord_flip() +  # flip axes to make horizontal
+  #coord_flip() +
+  theme_minimal() +
+  facet_grid(scenario~model_id) + 
+  theme(panel.border = element_blank(), axis.line = element_line()) + 
+  labs(x="Timing", y="Percent Hospital Admissions Averted", 
+       title = "Percent Averted") 
+plot_model_segregation
+
+filename = file.path(plot_path, "Scenarios_by_model.png")
+ggsave(filename, plot_model_segregation, width = 14, height = 5)
+
+## --- Difference percent averted -------------------------
+# test <- df_averted_diff_long %>% select(scenario, timing, location, model_id, rel_vec_perc, prop_cum) %>% filter(location == "US") %>%  mutate(count = 1) %>% group_by(scenario, timing, location, model_id) %>% summarise(countall = sum(count)) %>% ungroup()
+plot_model_segregationA <- ggplot(df_averted_diff_long %>% filter(location == "US", scenario == "diff_BC", !(model_id == "UIUC-IMMCYC" & location == "US"& timing == "Winter")), aes(x=timing, y=rel_vec_perc)) +
+  geom_boxplot() +
+  coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+  #coord_flip() +
+  theme_minimal() +
+  facet_wrap(~model_id) + 
+  theme(panel.border = element_blank(), axis.line = element_line()) + 
+  labs(x="Timing", y="Percent Hospital Admissions Averted", 
+       title = "Difference Percent Averted (C-B)/A") 
+plot_model_segregationA
+plot_model_segregationB <- ggplot(df_averted_diff_long %>% filter(location == "US", scenario == "diff_DE", !(model_id == "UIUC-IMMCYC" & location == "US"& timing == "Winter")), aes(x=timing, y=rel_vec_perc)) +
+  geom_boxplot() +
+  coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+  #coord_flip() +
+  theme_minimal() +
+  facet_wrap(~model_id) + 
+  theme(panel.border = element_blank(), axis.line = element_line()) + 
+  labs(x="Timing", y="Percent Hospital Admissions Averted", 
+       title = "Difference Percent Averted (E-D)/A") 
+plot_model_segregationB
+
+combined_plot = plot_model_segregationA / plot_model_segregationB
+filename = file.path(plot_path, "Nat_avert_compare_timing_by_model.png")
+ggsave(filename, combined_plot, width = 7, height = 10)
+
+
+```
+
+### Difference percent averted by locations
+```{r}
+
+## --- LOCATIONS difference percent averted -------------------------
+# test <- df_averted_diff_long %>% select(scenario, timing, location, model_id, rel_vec_perc, prop_cum) %>% filter(location == "US") %>%  mutate(count = 1) %>% group_by(scenario, timing, location, model_id) %>% summarise(countall = sum(count)) %>% ungroup()
+plot_model_segregationA <- ggplot(df_averted_diff_long %>% filter(location != "US", scenario == "diff_BC") %>% left_join(read_csv("locations.csv"), by = c("location")) %>%
+                                    mutate(abbreviation = fct_relevel(abbreviation, c("US"))), aes(x=timing, y=rel_vec_perc)) +
+  geom_boxplot() +
+  coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+  #coord_flip() +
+  theme_minimal() +
+  facet_wrap(~abbreviation) + 
+  theme(panel.border = element_blank(), axis.line = element_line()) + 
+  labs(x="Timing", y="Percent Hospital Admissions Averted", 
+       title = "Difference Percent Averted (C-B)/A") 
+plot_model_segregationA
+plot_model_segregationB <- ggplot(df_averted_diff_long %>% filter(location != "US", scenario == "diff_DE") %>% left_join(read_csv("locations.csv"), by = c("location")) %>%
+                                    mutate(abbreviation = fct_relevel(abbreviation, c("US"))), aes(x=timing, y=rel_vec_perc)) +
+  geom_boxplot() +
+  coord_flip(ylim = y_lims) +  # flip axes to make horizontal
+  #coord_flip() +
+  theme_minimal() +
+  facet_wrap(~abbreviation) + 
+  theme(panel.border = element_blank(), axis.line = element_line()) + 
+  labs(x="Timing", y="Percent Hospital Admissions Averted", 
+       title = "Difference Percent Averted (E-D)/A") 
+plot_model_segregationB
+
+combined_plot = plot_model_segregationA / plot_model_segregationB
+filename = file.path(plot_path, "Nat_avert_compare_timing_by_location.png")
+ggsave(filename, combined_plot, width = 9, height = 15)
+
+
+```
+
+
+### Continuous wave timing scatterplot
+```{r}
+
+## --- Continuous scatterplot  -------------------------
+
+## generate axis labels
+## median horizon week to MMWR week
+## MMWRweek(proj_start_date + 7*median_horizon)$MMWRweek
+
+plot_continuous2 <- ggplot(df_averted_long %>% 
+                             filter(location == "US") %>%
+                             mutate(scenario = paste("Scenario ", scenario, sep = "")),
+                           aes(x= median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(aes(color = model_id), alpha = 0.1) + 
+  facet_wrap(~scenario) + 
+  theme_minimal() +
+  stat_poly_line(aes(color = model_id)) +
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted", 
+                                                       title = "Percent averted by scenario") +
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "right",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=1)
+plot_continuous2
+
+filename = file.path(plot_path, "Nat_avert_continuous_timing_by_scenario.jpg")
+ggsave(filename, plot_continuous2, width = 10, height = 8)
+
+
+```
+
+### Continuous wave timing difference
+```{r}
+## --- Continuous diff scatterplot -------------------------
+
+plot_continuousA <- ggplot(df_averted_diff_long %>% 
+                             filter(location == "US", scenario == "diff_BC") %>%
+                             mutate(wave_type = if_else(model_id %in% c("Model 3", "Model 7"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"),
+                           aes(x=median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(aes(color = model_id), alpha = 0.1) +   
+  theme_minimal() +
+  stat_poly_line(aes(color = model_id)) +
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              color = "black",
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") +
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  ggtitle("Difference Percent Averted", "Relative difference in\nscenarios (C-B)/A") + 
+  facet_wrap(~wave_type, scales = "free") + 
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "bottom",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousA
+
+
+plot_continuousB <- ggplot(df_averted_diff_long %>% 
+                             filter(location == "US", scenario == "diff_DE") %>%
+                             mutate(wave_type = if_else(model_id %in% c("Model 3", "Model 7"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"), 
+                           aes(x=median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(aes(color = model_id), alpha = 0.1) +  
+  theme_minimal() +
+  stat_poly_line(aes(color = model_id)) +
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              color = "black",
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +  
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") + 
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  ggtitle("", "Relative difference in\nscenarios (E-D)/A") +
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  facet_wrap(~wave_type, scales = "free") + 
+  #scale_fill_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
+  #scale_color_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "none",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousB
+
+
+
+
+combined_plot = plot_continuousA / plot_continuousB
+filename = file.path(plot_path, "Nat_avert_continuous_timing_by_model.jpg")
+ggsave(filename, combined_plot, width = 7, height = 9)
+
+
+```
+
+### Continuous w/ all locations
+```{r}
+####### Continuous with all locations ########
+
+plot_continuous22 <- ggplot(df_averted_long %>% filter(location != "US") %>%
+                             mutate(scenario = paste("Scenario ", scenario, sep = "")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"), 
+                           aes(x=median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(color = "grey", alpha = 0.2) + 
+  facet_wrap(~scenario) + 
+  theme_minimal() +
+  stat_poly_line() +
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  # geom = "label_npc", size = 3,
+  # label.size = 0,
+  # alpha = 0.3
+  # ) +
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted", 
+       title = "Percent averted by scenario") +
+  scale_x_continuous(limits = c(1,50), breaks = seq(1,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(1,50, by = 4))$MMWRweek) + 
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "right",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=1)
+plot_continuous22
+
+filename = file.path(plot_path, "Nat_avert_continuous_timing_all_locations.jpg")
+ggsave(filename, plot_continuous22, width = 8, height = 6)
+
+
+```
+
+
+### Continuous difference (all locations)
+```{r}
+plot_continuousA2 <- ggplot(df_averted_diff_long %>% 
+                             filter(location != "US", scenario == "diff_BC") %>%
+                             mutate(wave_type = if_else(model_id %in% c("Model 3", "Model 7"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"),
+                           aes(x=median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(color = "grey", alpha = 0.2) +   
+  theme_minimal() +
+  stat_poly_line() +
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +
+  facet_wrap(~model_id, nrow = 2, scales = "free") + 
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") +
+  scale_x_continuous(limits = c(1,50), breaks = seq(1,50, by = 8), labels = MMWRweek(proj_start_date + 7*seq(1,50, by = 8))$MMWRweek) + 
+  ggtitle("Difference Percent Averted", "Relative difference in\nscenarios (C-B)/A") + 
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "bottom",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousA2
+
+
+
+plot_continuousB2 <- ggplot(df_averted_diff_long %>% 
+                             filter(location != "US", scenario == "diff_DE") %>%
+                             mutate(wave_type = if_else(model_id %in% c("MOBS_NEU-GLEAM_COVID", "UT-ImmunoSEIRS"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"), 
+                           aes(x=median_horizon, y=rel_vec_perc, color = model_id, fill = model_id)) +
+  geom_point(color = "grey", alpha = 0.2) +  
+  theme_minimal() +
+  stat_poly_line() +
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              color = "black", fill = "grey",
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +
+  facet_wrap(~model_id, nrow = 2, scales = "free") + 
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") + 
+  scale_x_continuous(limits = c(1,50), breaks = seq(1,50, by = 8), labels = MMWRweek(proj_start_date + 7*seq(1,50, by = 8))$MMWRweek) + 
+  ggtitle("", "Relative difference in\nscenarios (E-D)/A") +
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "none",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousB2
+
+combined_plot = plot_continuousA2 / plot_continuousB2
+filename = file.path(plot_path, "Nat_avert_continuous_timing_all_locations_scenarios.jpg")
+ggsave(filename, combined_plot, width = 9, height = 10)
+
+```
+
+### Coefficients by location
+```{r}
+#### Coeffs by location ####
+plot_coefficients_by_location <- read_csv( "data/states_regression.csv") %>%
+  mutate(model_id = gsub("Model ", "", model_id)) %>%
+  #filter(model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS") %>%
+  filter(!is.na(coeff)) %>%
+  left_join(read_csv("locations.csv"), by = c("location")) %>%
+  mutate(abbreviation = fct_relevel(abbreviation, c("US"))) %>%
+  ggplot(aes(x = abbreviation, y = model_id, fill = coeff)) + 
+  geom_tile() + 
+  scale_fill_stepsn("Slope",
+                    colors = c("#f4a582", "#d1e5f0", "#92c5de", "#4393c3", "#2166ac", "#053061"),
+                    n.breaks = 10
+                       ) +
+  facet_wrap(~scenario, nrow = 4) + 
+  scale_x_discrete("Location", expand = c(0,0)) + 
+  scale_y_discrete("Model", expand = c(0,0)) + 
+  ggtitle("Percent averted vs. hospitalization week") + 
+  theme_classic() + 
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "right",
+        legend.margin=margin(1,1.5,1.5,1.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.25)
+plot_coefficients_by_location
+
+filename = file.path(plot_path, "Nat_avert_continuous_timing_coefficient_matrix.jpg")
+ggsave(filename, plot_coefficients_by_location, width = 12, height = 9)
+
+## percentage with positive slope
+test <- states_regression %>% 
+  filter(location != "US") %>%
+  filter(!is.na(coeff)) %>%
+  mutate(slope_sign = if_else(coeff > 0, 1, 0),
+         index = 1) %>%
+  #group_by(scenario) %>%
+  mutate(total = sum(index),
+         pos = sum(slope_sign),
+         perc_pos = 100*pos/total
+         ) #%>%
+  #select(perc_pos, scenario) %>% distinct()
+
+```
+
+### Coefficients (difference) by location
+```{r}
+#### Diff coeffs by location ####
+plot_coefficients_by_location_diff <- read_csv("data/states_regression_diff.csv") %>%
+  mutate(scenario = if_else(scenario == "diff_BC", "(C-B)/A", "(E-D)/A")) %>%
+  mutate(model_id = gsub("Model ", "", model_id)) %>%
+  #filter(model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS") %>%
+  filter(!is.na(coeff)) %>%
+  left_join(read_csv("locations.csv"), by = c("location")) %>%
+  mutate(abbreviation = fct_relevel(abbreviation, c("US"))) %>%
+  ggplot(aes(x = abbreviation, y = model_id, fill = coeff)) + 
+  geom_tile() + 
+  scale_fill_stepsn("Slope",
+                    colors = c("#67001f","#b2182b","#d6604d","#f4a582", "#d1e5f0", "#92c5de", "#4393c3", "#2166ac", "#053061"),
+                    n.breaks = 10
+  ) +
+  facet_wrap(~scenario, nrow = 2) + 
+  scale_x_discrete("Location", expand = c(0,0)) + 
+  scale_y_discrete("Model", expand = c(0,0)) + 
+  ggtitle("Percent averted vs. hospitalization week") + 
+  theme_classic() + 
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "right",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.5)
+plot_coefficients_by_location_diff
+
+filename = file.path(plot_path, "Nat_avert_continuous_timing_coefficient_matrix_diff.jpg")
+ggsave(filename, plot_coefficients_by_location_diff, width = 12, height = 10)
+
+## percentage with positive slope
+test_diff <- states_regression_diff %>% 
+  filter(location != "US") %>%
+  filter(!is.na(coeff)) %>%
+  mutate(slope_sign = if_else(coeff > 0, 1, 0),
+         index = 1) %>%
+  #group_by(scenario) %>%
+  mutate(total = sum(index),
+         pos = sum(slope_sign),
+         perc_pos = 100*pos/total
+  ) #%>%
+#select(perc_pos, scenario) %>% distinct()
+
+```
+
+
+## Regression table -- Figure 5 I
+
+```{r}
+
+get_regression_coefficients_5I <- read_csv("data/df_averted_long.csv") %>% 
+                             filter(location == "US") %>%
+                             mutate(scenario = paste("Scenario ", scenario, sep = ""))
+
+list_regressions <- get_regression_coefficients_5I %>% 
+  dplyr::select(model_id, scenario) %>% distinct()
+
+coeffs_table <- NULL
+
+for (i in 1:nrow(list_regressions)){
+  regression_model_out <- lm(rel_vec_perc ~ median_horizon, data = get_regression_coefficients_5I %>% filter(model_id == list_regressions$model_id[i], scenario == list_regressions$scenario[i]))
+  out_df_coeff <- coef(summary(regression_model_out)) %>%
+    as.data.frame()
+out_df_coeff  <- tibble::rownames_to_column(out_df_coeff, "Term") %>%
+  mutate(Term = if_else(Term == "median_horizon", "Slope", "Intercept")) %>%
+  mutate(`[0.025` = confint(regression_model_out)[,1],
+         `0.975` = confint(regression_model_out)[,2]
+         ) %>%
+    mutate_if(is.numeric, round, digits=3) %>%
+  mutate(model_id = list_regressions$model_id[i], scenario = list_regressions$scenario[i])
+
+coeffs_table <- coeffs_table %>% rbind(out_df_coeff)
+}
+
+coeffs_tableB <- coeffs_table %>% filter(scenario == "Scenario B") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+coeffs_tableC <- coeffs_table %>% filter(scenario == "Scenario C") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+coeffs_tableD <- coeffs_table %>% filter(scenario == "Scenario D") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+coeffs_tableE <- coeffs_table %>% filter(scenario == "Scenario E") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+
+write_csv(coeffs_tableB, "data/coeffs_tableB.csv")
+write_csv(coeffs_tableC, "data/coeffs_tableC.csv")
+write_csv(coeffs_tableD, "data/coeffs_tableD.csv")
+write_csv(coeffs_tableE, "data/coeffs_tableE.csv")
+
+```
+
+## Regression table -- Figure 5 II
+
+```{r}
+
+get_regression_coefficients_5II <- read_csv("data/df_averted_diff_long.csv") %>% 
+                             filter(location == "US") %>%
+                             mutate(scenario = paste("Scenario ", scenario, sep = ""))
+
+list_regressions <- get_regression_coefficients_5II %>% 
+  dplyr::select(model_id, scenario) %>% distinct()
+
+coeffs_table <- NULL
+
+for (i in 1:nrow(list_regressions)){
+  regression_model_out <- lm(rel_vec_perc ~ median_horizon, data = get_regression_coefficients_5II %>% filter(model_id == list_regressions$model_id[i], scenario == list_regressions$scenario[i]))
+  out_df_coeff <- coef(summary(regression_model_out)) %>%
+    as.data.frame()
+out_df_coeff  <- tibble::rownames_to_column(out_df_coeff, "Term") %>%
+  mutate(`[0.025` = confint(regression_model_out)[,1],
+         `0.975` = confint(regression_model_out)[,2]
+         ) %>%
+    mutate_if(is.numeric, round, digits=3) %>%
+  mutate(Term = if_else(Term == "median_horizon", "Slope", "Intercept")) %>%
+  mutate(model_id = list_regressions$model_id[i], scenario = list_regressions$scenario[i])
+
+coeffs_table <- coeffs_table %>% rbind(out_df_coeff)
+}
+
+
+coeffs_tableBC <- coeffs_table %>% filter(scenario == "Scenario diff_BC") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+coeffs_tableDE <- coeffs_table %>% filter(scenario == "Scenario diff_DE") %>% 
+  arrange(model_id) %>%
+  dplyr::select(-scenario)
+
+
+write_csv(coeffs_tableBC, "data/coeffs_table_BCdiff.csv")
+write_csv(coeffs_tableDE, "data/coeffs_table_DEdiff.csv")
+
+```
+
+
+
+
+
+
+
