@@ -591,7 +591,7 @@ write_csv(df_averted_diff_long, "data/df_averted_diff_long.csv")
 ```
 
 
-## Regression analysis 
+## Scenario/model/location regression analysis 
 ```{r}
 ######## Regression analysis ########
 
@@ -653,8 +653,6 @@ for (i in 1:nrow(list_of_scenario_model_location_diff)){
 write_csv(states_regression_diff, "data/states_regression_diff.csv")
 
 ```
-
-
 
 ## Figures
 ### Percent averted by model
@@ -801,16 +799,17 @@ plot_continuousA <- ggplot(df_averted_diff_long %>%
   geom_point(aes(color = model_id), alpha = 0.1) +   
   theme_minimal() +
   stat_poly_line(aes(color = model_id)) +
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
   # stat_poly_eq(use_label(c("eq","R2", "p")),
   #              geom = "label_npc", size = 2.5,
   #              color = "black",
   #              label.size = 0,
   #              alpha = 0.3
   # ) +
-  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") +
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") +
   scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
   ggtitle("Difference Percent Averted", "Relative difference in\nscenarios (C-B)/A") + 
-  facet_wrap(~wave_type, scales = "free") + 
+  facet_wrap(~wave_type) + 
   scale_fill_manual("", values = palette) +
   scale_color_manual("", values = palette) +
   theme(axis.text = element_text(size = 12, color = "black"),
@@ -840,18 +839,19 @@ plot_continuousB <- ggplot(df_averted_diff_long %>%
   geom_point(aes(color = model_id), alpha = 0.1) +  
   theme_minimal() +
   stat_poly_line(aes(color = model_id)) +
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
   # stat_poly_eq(use_label(c("eq","R2", "p")),
   #              geom = "label_npc", size = 2.5,
   #              color = "black",
   #              label.size = 0,
   #              alpha = 0.3
   # ) +  
-  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") + 
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") + 
   scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
   ggtitle("", "Relative difference in\nscenarios (E-D)/A") +
   scale_fill_manual("", values = palette) +
   scale_color_manual("", values = palette) +
-  facet_wrap(~wave_type, scales = "free") + 
+  facet_wrap(~wave_type) + 
   #scale_fill_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
   #scale_color_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
   theme(axis.text = element_text(size = 12, color = "black"),
@@ -882,6 +882,154 @@ ggsave(filename, combined_plot, width = 7, height = 9)
 
 
 ```
+
+
+### Continuous wave timing single regression
+```{r}
+
+## --- Continuous scatterplot  -------------------------
+
+## generate axis labels
+## median horizon week to MMWR week
+## MMWRweek(proj_start_date + 7*median_horizon)$MMWRweek
+
+plot_continuous2_singleregression <- ggplot(df_averted_long %>% 
+                             filter(location == "US") %>%
+                             mutate(scenario = paste("Scenario ", scenario, sep = "")),
+                           aes(x= median_horizon, y=rel_vec_perc)) +
+  geom_point(aes(color = model_id), alpha = 0.1) + 
+  facet_wrap(~scenario) + 
+  theme_minimal() +
+  #stat_poly_line(color = "black", fill = "grey") +
+  geom_smooth(color = "black", fill = "grey") + 
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted", 
+                                                       title = "Percent averted by scenario") +
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "right",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=1)
+plot_continuous2_singleregression
+
+filename = file.path(plot_path, "Nat_avert_continuous_timing_by_scenario_singleregression.jpg")
+ggsave(filename, plot_continuous2_singleregression, width = 10, height = 8)
+
+
+```
+
+
+### Continuous wave timing difference single regression
+```{r}
+## --- Continuous diff scatterplot -------------------------
+
+plot_continuousA_singleregression <- ggplot(df_averted_diff_long %>% 
+                             filter(location == "US", scenario == "diff_BC") %>%
+                             mutate(wave_type = if_else(model_id %in% c("Model 3", "Model 7"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"),
+                           aes(x=median_horizon, y=rel_vec_perc)) +
+  geom_point(aes(color = model_id), alpha = 0.1) +   
+  theme_minimal() +
+  #stat_poly_line(color = "black", fill = "grey") +
+  geom_smooth(color = "black", fill = "grey") + 
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              color = "black",
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") +
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  ggtitle("Difference Percent Averted", "Relative difference in\nscenarios (C-B)/A") + 
+  facet_wrap(~wave_type, scales = "free") + 
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "bottom",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousA_singleregression
+
+
+plot_continuousB_singleregression <- ggplot(df_averted_diff_long %>% 
+                             filter(location == "US", scenario == "diff_DE") %>%
+                             mutate(wave_type = if_else(model_id %in% c("Model 3", "Model 7"), "No summer wave", "Summer wave")), #, model_id != "MOBS_NEU-GLEAM_COVID", model_id != "UT-ImmunoSEIRS"), 
+                           aes(x=median_horizon, y=rel_vec_perc)) +
+  geom_point(aes(color = model_id), alpha = 0.1) +  
+  theme_minimal() +
+  #stat_poly_line(color = "black", fill = "grey") +
+  geom_smooth(color = "black", fill = "grey") + 
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
+  # stat_poly_eq(use_label(c("eq","R2", "p")),
+  #              geom = "label_npc", size = 2.5,
+  #              color = "black",
+  #              label.size = 0,
+  #              alpha = 0.3
+  # ) +  
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") + 
+  scale_x_continuous(limits = c(10,50), breaks = seq(10,50, by = 4), labels = MMWRweek(proj_start_date + 7*seq(10,50, by = 4))$MMWRweek) + 
+  ggtitle("", "Relative difference in\nscenarios (E-D)/A") +
+  scale_fill_manual("", values = palette) +
+  scale_color_manual("", values = palette) +
+  facet_wrap(~wave_type, scales = "free") + 
+  #scale_fill_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
+  #scale_color_manual("Model", values = c("#66c2a5", "#fc8d62", "#e78ac3", "#a6d854", "#ffd92f", "#b3b3b3")) + 
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 12, color = "black"),
+        axis.text.x = element_text(angle = 45, vjust = 0.5),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        plot.title = element_text(colour = "black", size = 13.5, face = "bold"),
+        plot.title.position = "plot",
+        plot.subtitle = element_text(colour = "black", size = 12.5),
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm"),
+        legend.position = "none",
+        legend.margin=margin(1,1.5,0.5,0.5,unit = "line"),
+        legend.text = element_text(size = 12, color = "black"),
+        legend.title = element_text(size = 14, color = "black"),
+        strip.text = element_text(colour = "black", size = 12, hjust = 0),
+        strip.background = element_rect(colour="white", fill="white"),
+        panel.border = element_rect(colour = NA, fill=NA),
+        panel.spacing = unit(0.5, "cm"), aspect.ratio=0.75)
+plot_continuousB_singleregression
+
+
+
+
+combined_plot_singleregression = plot_continuousA_singleregression / plot_continuousB_singleregression
+filename = file.path(plot_path, "Nat_avert_continuous_timing_by_model_singleregression.jpg")
+ggsave(filename, combined_plot_singleregression, width = 7, height = 9)
+
+
+```
+
 
 ### Continuous w/ all locations
 ```{r}
@@ -939,13 +1087,14 @@ plot_continuousA2 <- ggplot(df_averted_diff_long %>%
   geom_point(color = "grey", alpha = 0.2) +   
   theme_minimal() +
   stat_poly_line() +
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
   # stat_poly_eq(use_label(c("eq","R2", "p")),
   #              geom = "label_npc", size = 2.5,
   #              label.size = 0,
   #              alpha = 0.3
   # ) +
   facet_wrap(~model_id, nrow = 2, scales = "free") + 
-  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") +
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") +
   scale_x_continuous(limits = c(1,50), breaks = seq(1,50, by = 8), labels = MMWRweek(proj_start_date + 7*seq(1,50, by = 8))$MMWRweek) + 
   ggtitle("Difference Percent Averted", "Relative difference in\nscenarios (C-B)/A") + 
   scale_fill_manual("", values = palette) +
@@ -978,6 +1127,7 @@ plot_continuousB2 <- ggplot(df_averted_diff_long %>%
   geom_point(color = "grey", alpha = 0.2) +  
   theme_minimal() +
   stat_poly_line() +
+  geom_hline(aes(yintercept = 0), color = "black", linetype = "dashed") + 
   # stat_poly_eq(use_label(c("eq","R2", "p")),
   #              geom = "label_npc", size = 2.5,
   #              color = "black", fill = "grey",
@@ -985,7 +1135,7 @@ plot_continuousB2 <- ggplot(df_averted_diff_long %>%
   #              alpha = 0.3
   # ) +
   facet_wrap(~model_id, nrow = 2, scales = "free") + 
-  labs(x="Median Hospitalization Week", y="Percent Hospital Admissions Averted") + 
+  labs(x="Median Hospitalization Week", y="Difference in Percent\nHospital Admissions Averted") + 
   scale_x_continuous(limits = c(1,50), breaks = seq(1,50, by = 8), labels = MMWRweek(proj_start_date + 7*seq(1,50, by = 8))$MMWRweek) + 
   ggtitle("", "Relative difference in\nscenarios (E-D)/A") +
   scale_fill_manual("", values = palette) +
@@ -1131,6 +1281,83 @@ test_diff <- states_regression_diff %>%
 ```
 
 
+## Check Ensemble MHW spread
+```{r}
+
+ensemble_path <- paste(repo_path, folder_path, "2025-04-27/Ensemble/inc hosp/US/Ensemble0.gz.parquet", sep = "")
+
+## grab MHW
+  dt_ensemble_median_horizon <- arrow::open_dataset(ensemble_path) %>% 
+    as.data.frame() %>%
+    filter(age_group == "0-130") %>%
+      group_by(scenario_id, output_type_id) %>%
+      arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+      mutate(
+        cum_value = cumsum(value),
+        total_value = sum(value),
+        prop_cum = cum_value / total_value
+      ) %>%
+      filter(prop_cum >= 0.5) %>%
+      slice_min(prop_cum, with_ties = FALSE) %>%
+      select(scenario_id, output_type_id,median_horizon = horizon, cumulative_value = cum_value)
+  
+  # convert horizon week to MMWR epi week
+  dt_ensemble_median_horizon$ew = proj_MMWR$MMWRweek[dt_ensemble_median_horizon$median_horizon]
+
+
+# find proportion of cumulative at horizon==26, scenario A
+df_prop_cum_a <- arrow::open_dataset(ensemble_path) %>% 
+    as.data.frame() %>%
+    filter(age_group == "0-130") %>%
+  group_by(scenario_id, output_type_id) %>%
+  arrange(horizon, .by_group = TRUE) %>%  # Ensure values are in horizon order
+  mutate(
+    cum_value = cumsum(value),
+    total_value = sum(value),
+    prop_cum = cum_value / total_value
+  ) %>%
+  mutate(half_week = if_else(
+    prop_cum >= 0.5, "Post", "Pre")
+    ) %>%
+  ## want the minimum week in the Post group 
+  group_by(scenario_id, output_type_id, half_week) %>%
+  ## group by half_week and if we are in the half_week == Post group, then set it to minimum horizon of that group
+  ## If we are in the Pre group, set it to -1
+  mutate(half_week2 = if_else(half_week == "Post", min(horizon), -1)) %>%
+  ungroup() %>%
+  group_by(output_type_id) %>%
+  ## then grab the max across both pre/post, which will return min of post
+  mutate(median_horizon = max(half_week2)) %>%
+  filter(horizon == 26) %>%
+  select(scenario_id, output_type_id, prop_cum=prop_cum, median_horizon, tot=total_value)
+
+
+```
+
+
+
+## View vaccine coverage curves - national
+```{r}
+
+dates <- read_csv("../SMH Round 19/data/auxiliary/COVID_RD19_Vaccination_curves.csv") %>%
+  filter(Geography == "National", Scenario == "Scenarios B & D", Risk_group == "Overall") %>%
+  dplyr::select(Date) %>% distinct() %>%
+  mutate(MMWRweek(Date)) %>%
+  arrange(Date)
+
+vax_sat <- read_csv("../SMH Round 19/data/auxiliary/COVID_RD19_Vaccination_curves.csv") %>%
+  filter(Geography == "National", Scenario == "Scenarios B & D", Risk_group == "Overall") %>%
+  group_by(Age) %>%
+  filter(`Cum.Coverage.Percent` >= 0.5*max(`Cum.Coverage.Percent`)) %>%
+  ungroup() %>%
+  ggplot(aes(x = Date, y = Cum.Coverage.Percent, color = Age)) + 
+  geom_line() + 
+  scale_x_continuous(breaks = dates$Date,labels = dates$MMWRweek)
+vax_sat
+```
+
+
+
 ## Regression table -- Figure 5 I
 
 ```{r}
@@ -1220,7 +1447,6 @@ write_csv(coeffs_tableBC, "data/coeffs_table_BCdiff.csv")
 write_csv(coeffs_tableDE, "data/coeffs_table_DEdiff.csv")
 
 ```
-
 
 
 
