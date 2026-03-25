@@ -1,7 +1,8 @@
 name: Update Truth Data
 on:
   workflow_dispatch:
-
+  schedule:
+    - cron: '0 9 * * 1'
 jobs:
   update_target-data:
     runs-on: ubuntu-latest
